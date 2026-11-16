@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "tollmod",
+  "version": "${version}",
+  "name": "\u901a\u884c\u6536\u8d39\u6a21\u7ec4",
+  "description": "Server-authoritative per-player toll points with optional vanilla clients.",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "dev.jdguo.toll.TollMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*",
+    "bankmod": "*"
+  },
+  "mixins": [
+    "tollmod.mixins.json"
+  ]
+}
