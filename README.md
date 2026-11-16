@@ -59,7 +59,7 @@ Java 17、Fabric Loader ≥0.15.11、Fabric API 0.92.2+1.20.1、MinecraftBankMod
 
 GitHub Actions 使用 Java 17 构建并上传 jar。JUnit 覆盖穿越几何、楼层过滤、中文币种/歧义、订单引用和去重持久化、损坏文件拒绝。
 
-当前本地独立核心测试已通过 10 项，完整 Fabric 构建受依赖下载限制尚未完成，不代表已通过 Minecraft 联机实测。发布前必须验证：
+本地独立核心测试通过 10 项，GitHub Actions 完整 Fabric 构建与 JUnit 测试已通过；这不代表已通过 Minecraft 联机实测。发布前必须验证：
 
 1. 原版 1.20.1 客户端登录，带模组客户端登录；
 2. 双人高速船、箱船库存、足额/不足、上下层和缓冲折返；
