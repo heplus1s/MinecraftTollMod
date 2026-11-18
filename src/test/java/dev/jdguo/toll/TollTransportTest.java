@@ -23,7 +23,7 @@ class TollTransportTest {
   assertEquals(1,dev.jdguo.bank.api.TollSettlement.receipts.size());assertEquals(0,dev.jdguo.bank.api.MarketSettlement.calls);
  }
  @Test void downgradeDoesNotFallBackToLegacy()throws Exception{
-  URL[] urls={BankBridge.class.getProtectionDomain().getCodeSource().getLocation(),com.google.gson.Gson.class.getProtectionDomain().getCodeSource().getLocation()};
+  URL[] urls={TollTransportTest.class.getProtectionDomain().getCodeSource().getLocation(),BankBridge.class.getProtectionDomain().getCodeSource().getLocation(),com.google.gson.Gson.class.getProtectionDomain().getCodeSource().getLocation()};
   try(var loader=new URLClassLoader(urls,ClassLoader.getPlatformClassLoader()){
    @Override protected Class<?> loadClass(String name,boolean resolve)throws ClassNotFoundException{
     if(name.equals("dev.jdguo.bank.api.TollSettlement"))throw new ClassNotFoundException("simulated older bank");return super.loadClass(name,resolve);
