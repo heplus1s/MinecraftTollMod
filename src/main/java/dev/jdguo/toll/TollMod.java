@@ -115,7 +115,7 @@ public final class TollMod implements ModInitializer {
             // Creation must not immediately bill people already standing in the zone.
             for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
             if(!save())return 0;
-            s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。明确欠费没收普通船；箱船仅让欠费乘客直接下船，不移除船或物品。"),true);return 1;
+            s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。普通船全员明确欠费才没收，否则仅欠费者下船；箱船仅让欠费乘客直接下船，不移除船或物品。"),true);return 1;
         }catch(Exception e){return error(s,"创建失败："+e.getMessage());}
     }
     private static Geometry.Position pos(Entity e){return new Geometry.Position(e.getX(),e.getY(),e.getZ());}
