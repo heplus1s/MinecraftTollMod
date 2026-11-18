@@ -12,6 +12,13 @@ public final class TollPolicy {
     private TollPolicy() {}
 
     public record Chunk(int x, int z) {}
+    public static boolean mayConfiscateBoat(boolean chest,java.util.Collection<String> passengerStates){
+        return !chest&&passengerStates!=null&&!passengerStates.isEmpty()
+                &&passengerStates.stream().allMatch("INSUFFICIENT"::equals);
+    }
+    public static boolean shouldEjectChestPassenger(String status,boolean creator,boolean stillAboard){
+        return "INSUFFICIENT".equals(status)&&!creator&&stillAboard;
+    }
     public static boolean isCreator(String creator,String player){return creator!=null&&creator.equals(player);}
     /** Recipient self-transfers remain no-ops; operator status does not confer any exemption. */
     public static boolean exemptFromNewOrder(TollStore.Point point,String player){

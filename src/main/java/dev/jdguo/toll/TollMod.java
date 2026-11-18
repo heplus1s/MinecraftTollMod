@@ -26,22 +26,26 @@ public final class TollMod implements ModInitializer {
     private TollStore store;
     private Path path;
     private boolean healthy;
+    private boolean initializeOnNextTick;
     private TollStateRepository repository;
     private long ticks;
     private record Sample(String dimension,Geometry.Position pos,Entity vehicle) {}
     private final Map<UUID,Sample> samples=new HashMap<>();
+    private record Passage(Set<String> passengers,Set<String> exempt,Map<String,TollStore.Order> orders) {}
+    private final Map<String,Passage> orderPassages=new HashMap<>();
+    private final Map<String,TollStore.Order> liveEjections=new HashMap<>();
     private final Map<String,Long> seizureWindows=new HashMap<>(); // live passage only; never resurrect punishment after restart
     @Override public void onInitialize() {
         instance=this;
         ServerLifecycleEvents.SERVER_STARTED.register(server->{
             path=server.getSavePath(WorldSavePath.ROOT).resolve("data/tollmod/state.json");
-            try {
-                BankBridge.verifyApi();repository=TollStateRepository.open(path);store=repository.state;healthy=true;
-            } catch(Exception e){healthy=false;System.err.println("[tollmod] Disabled: "+e);}
-            samples.clear();seizureWindows.clear();ticks=0;
+            // All SERVER_STARTED callbacks must finish before inspecting the bank runtime.
+            // Dependency presence does not establish an event-listener execution order.
+            healthy=false;store=null;repository=null;initializeOnNextTick=true;
+            samples.clear();seizureWindows.clear();orderPassages.clear();liveEjections.clear();ticks=0;
         });
         ServerLifecycleEvents.SERVER_STOPPING.register(TollHolograms::close);
-        ServerLifecycleEvents.SERVER_STOPPED.register(server->{samples.clear();healthy=false;store=null;});
+        ServerLifecycleEvents.SERVER_STOPPED.register(server->{samples.clear();orderPassages.clear();liveEjections.clear();healthy=false;store=null;initializeOnNextTick=false;});
         ServerTickEvents.END_SERVER_TICK.register(this::tick);
         CommandRegistrationCallback.EVENT.register((dispatcher,registry,environment)->dispatcher.register(literal("toll")
             .then(automaticCommand("private"))
@@ -111,14 +115,22 @@ public final class TollMod implements ModInitializer {
             // Creation must not immediately bill people already standing in the zone.
             for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
             if(!save())return 0;
-            s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。明确欠费没收普通船；箱船暂不没收，保留欠费记录。"),true);return 1;
+            s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。明确欠费没收普通船；箱船仅让欠费乘客直接下船，不移除船或物品。"),true);return 1;
         }catch(Exception e){return error(s,"创建失败："+e.getMessage());}
     }
     private static Geometry.Position pos(Entity e){return new Geometry.Position(e.getX(),e.getY(),e.getZ());}
     private static String key(ServerPlayerEntity p,TollStore.Point point){return p.getUuid()+":"+point.id;}
     private void tick(MinecraftServer server){
+        if(initializeOnNextTick){
+            // Exactly one attempt: do not retry uncertain migration/persistence failures.
+            initializeOnNextTick=false;
+            try {
+                BankBridge.verifyApi();repository=TollStateRepository.open(path);store=repository.state;healthy=true;
+            } catch(Exception e){healthy=false;System.err.println("[tollmod] Disabled: "+e);}
+        }
         if(!healthy)return;ticks++;
         if(ticks%20==0)TollHolograms.reconcile(server,store.points.values());
+        Map<String,Passage> newPassages=new HashMap<>();
         Set<UUID> online=new HashSet<>();
         for(var p:server.getPlayerManager().getPlayerList()){
             online.add(p.getUuid());var current=new Sample(p.getWorld().getRegistryKey().getValue().toString(),pos(p),p.getVehicle());var prev=samples.put(p.getUuid(),current);
@@ -142,6 +154,17 @@ public final class TollMod implements ModInitializer {
                     if(store.orders.size()>=10000){healthy=false;System.err.println("[tollmod] 10000 order safety limit reached; paused, archive with administrator review.");return;}
                     store.blocked.add(k);
                     var o=new TollStore.Order();o.transport=BankBridge.modernApi()?"toll-v1":"legacy";o.mode=point.mode;o.creator=point.creator;o.player=p.getUuidAsString();o.recipient=point.recipient;o.currency=point.currency;o.amount=point.amount;o.point=point.id;o.boat=current.vehicle instanceof BoatEntity?current.vehicle.getUuidAsString():null;
+                    if(o.boat!=null){
+                        Passage passage=newPassages.computeIfAbsent(o.boat+":"+point.id,unused->{
+                            Set<String> passengers=new HashSet<>(),exempt=new HashSet<>();
+                            for(Entity rider:current.vehicle.getPassengerList()){
+                                passengers.add(rider.getUuidAsString());
+                                if(TollPolicy.exemptFromNewOrder(point,rider.getUuidAsString()))exempt.add(rider.getUuidAsString());
+                            }
+                            return new Passage(passengers,exempt,new HashMap<>());
+                        });
+                        passage.orders.put(o.player,o);orderPassages.put(o.reference,passage);
+                    }
                     store.orders.put(o.reference,o);if(!save())return;
                     if(o.boat!=null)seizureWindows.put(o.reference,ticks+100);
                     p.sendMessage(Text.literal("收费点「"+point.name+"」："+point.amount+" "+point.currencyName),false);
@@ -156,8 +179,18 @@ public final class TollMod implements ModInitializer {
             return rider==null||rider.getVehicle()==null||!rider.getVehicle().getUuidAsString().equals(order.boat);
         });
         if(ticks%100==0)for(var o:new ArrayList<>(store.orders.values()))if(o.status.equals("PENDING")){pay(o,server);if(!healthy)return;}
+        orderPassages.keySet().retainAll(seizureWindows.keySet());
         // Process after all passengers were billed, never delete a two-seat boat midway through passenger iteration.
         for(var o:store.orders.values())if(o.status.equals("INSUFFICIENT")&&o.boat!=null)confiscate(o,server);
+        // Same live passage: remounting does not create a second charge or bypass ejection.
+        liveEjections.entrySet().removeIf(entry->{
+            var order=entry.getValue();var rider=server.getPlayerManager().getPlayer(UUID.fromString(order.player));
+            var point=store.points.values().stream().filter(v->v.id.equals(order.point)).findFirst().orElse(null);
+            if(rider==null||point==null||!rider.getWorld().getRegistryKey().getValue().toString().equals(point.dimension)
+                    ||!Geometry.inside(pos(rider),point.center(),point.radius+2,point.halfHeight()+2))return true;
+            if(rider.getVehicle()!=null&&rider.getVehicle().getUuidAsString().equals(order.boat))rider.stopRiding();
+            return false;
+        });
     }
     private static double distance(Geometry.Position a,Geometry.Position b){return Math.sqrt(Math.pow(a.x()-b.x(),2)+Math.pow(a.y()-b.y(),2)+Math.pow(a.z()-b.z(),2));}
     private void pay(TollStore.Order o,MinecraftServer server){
@@ -177,8 +210,19 @@ public final class TollMod implements ModInitializer {
         var p=server.getPlayerManager().getPlayer(UUID.fromString(o.player));
         if(p!=null&&!o.status.equals("PENDING")){
             p.sendMessage(Text.literal("通行收费："+o.status+" ("+r.code()+")"),false);
-            if(o.status.equals("INSUFFICIENT")&&p.getVehicle() instanceof ChestBoatEntity)p.sendMessage(Text.literal("箱船欠费已记录；为保护箱内物品，本版不会没收箱船，请联系管理员处理。"),false);
+            if(o.status.equals("INSUFFICIENT")&&p.getVehicle() instanceof ChestBoatEntity)p.sendMessage(Text.literal("箱船通行费不足：仅欠费乘客直接下船；船、箱内物品及已付款乘客保留。"),false);
         }
+    }
+    private void ejectUnpaidPassenger(TollStore.Order order,ServerPlayerEntity debtor,BoatEntity boat){
+        if(!TollPolicy.shouldEjectChestPassenger(order.status,TollPolicy.isCreator(order.creator,order.player),
+                debtor.getVehicle()==boat && boat.getPassengerList().contains(debtor)))return;
+        // Requested policy: immediate dismount, with no safe-ground search or teleport.
+        // Do not modify the boat, its inventory, or other passengers.
+        debtor.stopRiding();
+        order.status="REVIEW";order.lastCode="passenger_ejected";
+        seizureWindows.remove(order.reference);liveEjections.put(order.reference,order);
+        save(); // no replay after restart; no new payment reference or second debit
+        debtor.sendMessage(Text.literal("通行费不足，已直接下船。船和物品保留，其他乘客不会因本次处理再次扣费。"),false);
     }
     private void confiscate(TollStore.Order o,MinecraftServer server){
         if(!healthy)return;
@@ -190,8 +234,19 @@ public final class TollMod implements ModInitializer {
         }
         for(ServerWorld world:server.getWorlds()){
             Entity e=world.getEntity(UUID.fromString(o.boat));if(!(e instanceof BoatEntity boat))continue;
-            // Until an audited recovery command exists, never remove a container boat.
-            if(boat instanceof ChestBoatEntity){o.status="REVIEW";o.lastCode="container_preserved";seizureWindows.remove(o.reference);save();return;}
+            // Container boats are never archived, removed, or emptied. Only this debtor exits.
+            Passage passage=orderPassages.get(o.reference);
+            List<String> states=new ArrayList<>();
+            Set<String> aboard=new HashSet<>();for(Entity rider:boat.getPassengerList())aboard.add(rider.getUuidAsString());
+            if(passage!=null&&aboard.equals(passage.passengers)){
+                for(String rider:passage.passengers){
+                    var billed=passage.orders.get(rider);
+                    states.add(passage.exempt.contains(rider)?"EXEMPT":billed==null?"UNKNOWN":billed.status);
+                }
+            }else states.add("UNKNOWN");
+            if(!TollPolicy.mayConfiscateBoat(boat instanceof ChestBoatEntity,states)){
+                ejectUnpaidPassenger(o,debtor,boat);return;
+            }
             // Do not confiscate a boat now occupied by unrelated players after the debtor left.
             if(boat.getPassengerList().stream().noneMatch(p->p.getUuidAsString().equals(o.player)))continue;
             boat.setVelocity(Vec3d.ZERO);
@@ -215,7 +270,7 @@ public final class TollMod implements ModInitializer {
                 var seizure=new TollStore.Seizure();seizure.boat=o.boat;seizure.dimension=world.getRegistryKey().getValue().toString();seizure.reason=o.reference;seizure.entityType=net.minecraft.registry.Registries.ENTITY_TYPE.getId(boat.getType()).toString();
                 seizure.nbt=boat.writeNbt(new NbtCompound()).asString();store.seizures.put(o.boat,seizure);if(!save())return;
             }
-            for(var passenger:passengers)if(passenger instanceof ServerPlayerEntity rider)rider.sendMessage(Text.literal("同船乘客通行费余额不足，本船将移除；全部乘客将安全下船。已付通行费不自动退还。"),false);
+            for(var passenger:passengers)if(passenger instanceof ServerPlayerEntity rider)rider.sendMessage(Text.literal("本船全体乘客通行费余额不足，本船将移除；全部乘客将安全下船。已付通行费不自动退还。"),false);
             for(int i=0;i<passengers.size();i++){var p=passengers.get(i);p.stopRiding();var v=exits.get(i);p.requestTeleport(v.x,v.y,v.z);}
             boat.discard(); // Ordinary boats only; chest boats are never removed.
             store.seizures.get(o.boat).status="REMOVED";
