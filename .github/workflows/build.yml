@@ -19,3 +19,31 @@ jobs:
         with:
           name: tollmod-jars
           path: build/libs/*.jar
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tollmod-jars
+          path: release-jars
+      - name: Publish first release without replacing an existing version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            echo "Release v1.0.0 already exists; refusing to replace it."
+            exit 1
+          fi
+          if gh api repos/heplus1s/MinecraftTollMod/git/ref/tags/v1.0.0 >/dev/null 2>&1; then
+            echo "Tag v1.0.0 already exists; refusing to move it."
+            exit 1
+          fi
+          gh release view v1.0.17 --repo heplus1s/MinecraftBankMod >/dev/null
+          gh release create v1.0.0 release-jars/tollmod-1.0.0.jar --target "$GITHUB_SHA" --title "v1.0.0 私人和系统收费点" --notes-file RELEASE_NOTES_1.0.0.md
