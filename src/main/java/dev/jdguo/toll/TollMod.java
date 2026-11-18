@@ -16,6 +16,7 @@ import net.minecraft.text.Text;
 import net.minecraft.util.WorldSavePath;
 import net.minecraft.util.math.*;
 import java.nio.file.Path;
+import java.math.BigDecimal;
 import java.util.*;
 import static net.minecraft.server.command.CommandManager.*;
 
@@ -25,31 +26,75 @@ public final class TollMod implements ModInitializer {
     private TollStore store;
     private Path path;
     private boolean healthy;
+    private TollStateRepository repository;
     private long ticks;
     private record Sample(String dimension,Geometry.Position pos,Entity vehicle) {}
     private final Map<UUID,Sample> samples=new HashMap<>();
+    private final Map<String,Long> seizureWindows=new HashMap<>(); // live passage only; never resurrect punishment after restart
     @Override public void onInitialize() {
         instance=this;
         ServerLifecycleEvents.SERVER_STARTED.register(server->{
             path=server.getSavePath(WorldSavePath.ROOT).resolve("data/tollmod/state.json");
-            try {BankBridge.verifyApi();store=TollStore.load(path);healthy=true;} catch(Exception e){healthy=false;System.err.println("[tollmod] Disabled: "+e);}
-            samples.clear();ticks=0;
+            try {
+                BankBridge.verifyApi();repository=TollStateRepository.open(path);store=repository.state;healthy=true;
+            } catch(Exception e){healthy=false;System.err.println("[tollmod] Disabled: "+e);}
+            samples.clear();seizureWindows.clear();ticks=0;
         });
+        ServerLifecycleEvents.SERVER_STOPPING.register(TollHolograms::close);
         ServerLifecycleEvents.SERVER_STOPPED.register(server->{samples.clear();healthy=false;store=null;});
         ServerTickEvents.END_SERVER_TICK.register(this::tick);
         CommandRegistrationCallback.EVENT.register((dispatcher,registry,environment)->dispatcher.register(literal("toll")
-            .requires(s->s.hasPermissionLevel(2))
-            .then(literal("create").then(argument("name",StringArgumentType.string()).then(argument("radius",DoubleArgumentType.doubleArg(1,128))
+            .then(automaticCommand("private"))
+            .then(automaticCommand("system").requires(source->source.hasPermissionLevel(2)))
+            .then(literal("create").requires(s->s.hasPermissionLevel(2)).then(argument("name",StringArgumentType.string()).then(argument("radius",DoubleArgumentType.doubleArg(1,128))
                 .then(argument("currency",StringArgumentType.string()).suggests((c,b)->{try {for(var v:BankBridge.currencies()){b.suggest("\""+v.name()+"\"");b.suggest("\"id:"+v.id()+"\"");}}catch(Exception ignored){}return b.buildFuture();})
                 .then(argument("amount",IntegerArgumentType.integer(1,1000000000)).then(argument("recipient",StringArgumentType.word()).executes(c->create(c.getSource(),StringArgumentType.getString(c,"name"),DoubleArgumentType.getDouble(c,"radius"),StringArgumentType.getString(c,"currency"),IntegerArgumentType.getInteger(c,"amount"),StringArgumentType.getString(c,"recipient")))))))))
-            .then(literal("list").executes(c->{if(!ready(c.getSource()))return 0;for(var p:store.points.values())c.getSource().sendFeedback(()->Text.literal(p.name+" | "+p.radius+"格 | "+p.amount+" "+p.currencyName),false);return store.points.size();}))
-            .then(literal("info").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null)return error(c.getSource(),"收费点不存在");c.getSource().sendFeedback(()->Text.literal(p.name+" "+p.dimension+" "+p.x+","+p.y+","+p.z+" 半径="+p.radius+" 上下="+p.height+" 费用="+p.amount+" "+p.currencyName+" ["+p.currency+"] 收款="+p.recipient),false);return 1;})))
-            .then(literal("remove").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.remove(StringArgumentType.getString(c,"name"));if(p==null)return error(c.getSource(),"收费点不存在");if(!save())return error(c.getSource(),"保存失败，收费已暂停");c.getSource().sendFeedback(()->Text.literal("已删除收费点；历史订单保留"),true);return 1;})))
+            .then(literal("list").executes(c->{if(!ready(c.getSource()))return 0;for(var p:store.points.values())if(canManage(c.getSource(),p))c.getSource().sendFeedback(()->Text.literal(p.name+" | "+p.radius+"格 | "+p.amount+" "+p.currencyName),false);return store.points.size();}))
+            .then(literal("info").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");c.getSource().sendFeedback(()->Text.literal(p.name+" "+p.dimension+" "+p.x+","+p.y+","+p.z+" 半径="+p.radius+" 向下="+p.below()+" 向上="+p.above()+" 费用="+p.amount+" "+p.currencyName+" ["+p.currency+"] 收款="+p.recipient),false);return 1;})))
+            .then(literal("remove").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");store.points.remove(p.name);store.blocked.removeIf(k->k.endsWith(":"+p.id));if(!save())return error(c.getSource(),"保存失败，收费已暂停");c.getSource().sendFeedback(()->Text.literal("已删除收费点；历史订单保留"),true);return 1;})))
         ));
+    }
+    private com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> automaticCommand(String mode) {
+        return literal(mode).then(argument("currency",StringArgumentType.string())
+            .suggests((c,b)->{try {for(var v:BankBridge.currencies())b.suggest("\"id:"+v.id()+"\"");}catch(Exception ignored){}return b.buildFuture();})
+            .then(argument("amount",StringArgumentType.word())
+                .executes(c->createAutomatic(c.getSource(),mode,3,2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
+                .then(argument("radius",DoubleArgumentType.doubleArg(1,128))
+                    .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
+                    .then(argument("below",DoubleArgumentType.doubleArg(0,128)).then(argument("above",DoubleArgumentType.doubleArg(0,128))
+                        .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),DoubleArgumentType.getDouble(c,"below"),DoubleArgumentType.getDouble(c,"above"),StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount"))))))));
+    }
+    private boolean canManage(ServerCommandSource s,TollStore.Point p){
+        return s.hasPermissionLevel(2) || ("private".equals(p.mode) && s.getEntity() instanceof ServerPlayerEntity player && player.getUuidAsString().equals(p.owner));
+    }
+    private int createAutomatic(ServerCommandSource s,String mode,double radius,double below,double above,String currency,String input) {
+        if(!ready(s))return 0;
+        if("system".equals(mode)&&!BankBridge.modernApi())return error(s,"银行尚未提供收费系统账户接口，不能创建系统收费点，请升级配套银行模组");
+        try {
+            var player=s.getPlayerOrThrow();var cur=BankBridge.resolve(currency,BankBridge.currencies());
+            BigDecimal amount=TollPolicy.parseAmount(input,!cur.id().equals("note")&&!cur.id().startsWith("personal:"));
+            if(amount.compareTo(new BigDecimal("1000000000"))>0)return error(s,"金额不能超过1000000000");
+            if(!BankBridge.modernApi()&&amount.stripTrailingZeros().scale()>0)return error(s,"当前银行接口仅支持整数收费，请升级配套银行模组");
+            if(below+above<=0)return error(s,"上下范围不能同时为0");
+            if("system".equals(mode)){var preview=BankBridge.previewSystem(cur.id(),amount);if(!preview.success())return error(s,"当前无法以该金额结算系统收费："+preview.code()+"。未创建收费点，未扣款。");}
+            var p=new TollStore.Point();p.below=below;p.above=above;p.name=p.id;p.mode=mode;p.owner=player.getUuidAsString();p.recipient="private".equals(mode)?p.owner:null;
+            p.radius=radius;p.x=player.getX();p.y=player.getY();p.z=player.getZ();p.dimension=player.getWorld().getRegistryKey().getValue().toString();
+            p.currency=cur.id();p.currencyName=cur.name();p.amount=amount.toPlainString();
+            if("private".equals(mode)&&!LandBridge.ownsArea(s.getServer(),player.getUuid(),p))return error(s,"收费范围必须完全位于你自己的领地内；领地接口不可用时禁止创建");
+            if(store.points.size()>=128)return error(s,"最多支持128个收费点");
+            for(var other:store.points.values())if(p.dimension.equals(other.dimension)&&Math.abs(p.center().y()-other.center().y())<=p.halfHeight()+other.halfHeight()+4&&Math.hypot(p.x-other.x,p.z-other.z)<=p.radius+other.radius+4)return error(s,"与其他收费点或缓冲区重叠");
+            store.points.put(p.name,p);
+            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
+            if(!save())return error(s,"保存失败，收费暂停");
+            s.sendFeedback(()->Text.literal("已创建"+("private".equals(mode)?"私人":"系统")+"收费点 "+p.name+"；每人 "+p.amount+" "+p.currencyName+"，半径"+p.radius+"，向下"+p.below()+"、向上"+p.above()+"格"),true);return 1;
+        }catch(Exception invalid){return error(s,"创建失败："+invalid.getMessage());}
     }
     private boolean ready(ServerCommandSource s){if(!healthy){error(s,"收费服务不可用，请检查日志/保存文件");return false;}return true;}
     private int error(ServerCommandSource s,String message){s.sendError(Text.literal(message));return 0;}
-    private boolean save(){try {store.save(path);return true;}catch(Exception e){healthy=false;System.err.println("[tollmod] Persistence failed; paused: "+e);return false;}}
+    private boolean save(){try {
+        if(store.blocked.size()>100000)throw new IllegalStateException("去重记录达到安全上限");
+        repository.save();
+        return true;}catch(Exception e){healthy=false;System.err.println("[tollmod] Persistence failed; paused: "+e);return false;}}
     private int create(ServerCommandSource s,String name,double radius,String currency,int amount,String recipient){
         if(!ready(s))return 0;
         if(store.points.size()>=128)return error(s,"初版最多支持128个收费点");
@@ -60,10 +105,10 @@ public final class TollMod implements ModInitializer {
             try{payee=UUID.fromString(recipient);}catch(IllegalArgumentException e){var target=s.getServer().getPlayerManager().getPlayer(recipient);if(target==null)return error(s,"名称须为在线玩家，离线收款人请用 UUID");payee=target.getUuid();}
             var cur=BankBridge.resolve(currency,BankBridge.currencies());
             var p=new TollStore.Point();p.name=name;p.radius=radius;p.x=player.getX();p.y=player.getY();p.z=player.getZ();p.dimension=player.getWorld().getRegistryKey().getValue().toString();p.currency=cur.id();p.currencyName=cur.name();p.amount=Integer.toString(amount);p.recipient=payee.toString();
-            for(var other:store.points.values()) if(p.dimension.equals(other.dimension)&&Math.abs(p.y-other.y)<=p.height+other.height&&Math.hypot(p.x-other.x,p.z-other.z)<=p.radius+other.radius+4)return error(s,"与已有收费点/缓冲区重叠，请移动中心");
+            for(var other:store.points.values()) if(p.dimension.equals(other.dimension)&&Math.abs(p.center().y()-other.center().y())<=p.halfHeight()+other.halfHeight()+4&&Math.hypot(p.x-other.x,p.z-other.z)<=p.radius+other.radius+4)return error(s,"与已有收费点/缓冲区重叠，请移动中心");
             store.points.put(name,p);if(!save())return error(s,"保存失败，收费暂停");
             // Creation must not immediately bill people already standing in the zone.
-            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.height+2))store.blocked.add(key(q,p));
+            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
             if(!save())return 0;
             s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。明确欠费没收普通船；箱船暂不没收，保留欠费记录。"),true);return 1;
         }catch(Exception e){return error(s,"创建失败："+e.getMessage());}
@@ -72,13 +117,15 @@ public final class TollMod implements ModInitializer {
     private static String key(ServerPlayerEntity p,TollStore.Point point){return p.getUuid()+":"+point.id;}
     private void tick(MinecraftServer server){
         if(!healthy)return;ticks++;
+        if(ticks%20==0)TollHolograms.reconcile(server,store.points.values());
         Set<UUID> online=new HashSet<>();
         for(var p:server.getPlayerManager().getPlayerList()){
             online.add(p.getUuid());var current=new Sample(p.getWorld().getRegistryKey().getValue().toString(),pos(p),p.getVehicle());var prev=samples.put(p.getUuid(),current);
             if(p.isSpectator())continue;
             for(var point:store.points.values()){
                 if(!point.dimension.equals(current.dimension))continue;
-                String k=key(p,point);boolean insideBuffer=Geometry.inside(current.pos,point.center(),point.radius+2,point.height+2);
+                if(p.getUuidAsString().equals(point.recipient))continue; // no self-payment orders
+                String k=key(p,point);boolean insideBuffer=Geometry.inside(current.pos,point.center(),point.radius+2,point.halfHeight()+2);
                 if(prev==null||!prev.dimension.equals(current.dimension)||distance(prev.pos,current.pos)>64){
                     if(insideBuffer&&store.blocked.add(k)&&!save())return;
                     continue; // login/respawn/dimension or large teleport: no fabricated travel segment
@@ -86,29 +133,38 @@ public final class TollMod implements ModInitializer {
                 if(store.blocked.contains(k)){
                     if(!insideBuffer&&ticks%20==0){store.blocked.remove(k);if(!save())return;}continue;
                 }
-                if(Geometry.crosses(prev.pos,current.pos,point.center(),point.radius,point.height)){
+                if(Geometry.crosses(prev.pos,current.pos,point.center(),point.radius,point.halfHeight())){
+                    if("private".equals(point.mode)&&!LandBridge.ownsArea(server,UUID.fromString(point.owner),point)){
+                        store.blocked.add(k);if(!save())return;continue; // do not charge a stationary player if ownership later returns
+                    }
                     if(store.orders.values().stream().anyMatch(o->o.player.equals(p.getUuidAsString())&&o.point.equals(point.id)&&o.status.equals("PENDING")))continue;
                     if(store.orders.size()>=10000){healthy=false;System.err.println("[tollmod] 10000 order safety limit reached; paused, archive with administrator review.");return;}
                     store.blocked.add(k);
-                    var o=new TollStore.Order();o.player=p.getUuidAsString();o.recipient=point.recipient;o.currency=point.currency;o.amount=point.amount;o.point=point.id;o.boat=current.vehicle instanceof BoatEntity?current.vehicle.getUuidAsString():null;
+                    var o=new TollStore.Order();o.transport=BankBridge.modernApi()?"toll-v1":"legacy";o.mode=point.mode;o.player=p.getUuidAsString();o.recipient=point.recipient;o.currency=point.currency;o.amount=point.amount;o.point=point.id;o.boat=current.vehicle instanceof BoatEntity?current.vehicle.getUuidAsString():null;
                     store.orders.put(o.reference,o);if(!save())return;
+                    if(o.boat!=null)seizureWindows.put(o.reference,ticks+100);
                     p.sendMessage(Text.literal("收费点「"+point.name+"」："+point.amount+" "+point.currencyName),false);
                     pay(o,server);if(!healthy)return;
                 }
             }
         }
         samples.keySet().retainAll(online);
+        seizureWindows.entrySet().removeIf(e->{
+            var order=store.orders.get(e.getKey());if(order==null||e.getValue()<ticks||Set.of("PAID","REVIEW","CONFISCATED").contains(order.status))return true;
+            var rider=server.getPlayerManager().getPlayer(UUID.fromString(order.player));
+            return rider==null||rider.getVehicle()==null||!rider.getVehicle().getUuidAsString().equals(order.boat);
+        });
         if(ticks%100==0)for(var o:new ArrayList<>(store.orders.values()))if(o.status.equals("PENDING")){pay(o,server);if(!healthy)return;}
         // Process after all passengers were billed, never delete a two-seat boat midway through passenger iteration.
         for(var o:store.orders.values())if(o.status.equals("INSUFFICIENT")&&o.boat!=null)confiscate(o,server);
     }
     private static double distance(Geometry.Position a,Geometry.Position b){return Math.sqrt(Math.pow(a.x()-b.x(),2)+Math.pow(a.y()-b.y(),2)+Math.pow(a.z()-b.z(),2));}
     private void pay(TollStore.Order o,MinecraftServer server){
-        var r=BankBridge.transfer(UUID.fromString(o.player),UUID.fromString(o.recipient),o.currency,o.amount,o.reference);
+        var r=BankBridge.charge(o);
         o.lastCode=r.code();
         if(r.success())o.status="PAID";
         else if(r.code().equals("insufficient_funds"))o.status="INSUFFICIENT";
-        else if(Set.of("reference_conflict","unknown_currency","invalid_amount","bad_amount","same_account","bad_account").contains(r.code()))o.status="REVIEW";
+        else if(Set.of("reference_conflict","unknown_currency","invalid_amount","bad_amount","same_account","bad_account","unsupported_system","unsupported_precision","invalid","currency","bad_reference","unsupported_settlement","insufficient_treasury","insufficient_backing","no_current_rate","below_precision","paused").contains(r.code()))o.status="REVIEW";
         // For bank_pending, call the SAME transfer again; it deduplicates and retries persistence.
         // Never promote an in-memory marketReceipt to a durable success.
         if(!save())return;
@@ -120,29 +176,44 @@ public final class TollMod implements ModInitializer {
     }
     private void confiscate(TollStore.Order o,MinecraftServer server){
         if(!healthy)return;
+        var debtor=server.getPlayerManager().getPlayer(UUID.fromString(o.player));
+        Long expires=seizureWindows.get(o.reference);
+        if(expires==null||ticks>expires||debtor==null||debtor.getVehicle()==null||!debtor.getVehicle().getUuidAsString().equals(o.boat)){
+            o.status="REVIEW";o.lastCode="seizure_window_closed";seizureWindows.remove(o.reference);save();return;
+        }
         for(ServerWorld world:server.getWorlds()){
             Entity e=world.getEntity(UUID.fromString(o.boat));if(!(e instanceof BoatEntity boat))continue;
             // Until an audited recovery command exists, never remove a container boat.
-            if(boat instanceof ChestBoatEntity)continue;
+            if(boat instanceof ChestBoatEntity){o.status="REVIEW";o.lastCode="container_preserved";seizureWindows.remove(o.reference);save();return;}
             // Do not confiscate a boat now occupied by unrelated players after the debtor left.
             if(boat.getPassengerList().stream().noneMatch(p->p.getUuidAsString().equals(o.player)))continue;
             boat.setVelocity(Vec3d.ZERO);
             List<Entity> passengers=new ArrayList<>(boat.getPassengerList());
             List<Vec3d> exits=new ArrayList<>();
+            List<Box> exitBoxes=new ArrayList<>();
             for(int dx=-3;dx<=3&&exits.size()<passengers.size();dx++)for(int dz=-3;dz<=3&&exits.size()<passengers.size();dz++){
                 BlockPos feet=boat.getBlockPos().add(dx,0,dz);
-                if(world.isChunkLoaded(feet)&&world.getBlockState(feet.down()).isSolidBlock(world,feet.down())&&!world.getBlockState(feet.down()).isOf(net.minecraft.block.Blocks.MAGMA_BLOCK)&&!world.getBlockState(feet.down()).isOf(net.minecraft.block.Blocks.CACTUS)&&world.isAir(feet)&&world.isAir(feet.up()))exits.add(Vec3d.ofBottomCenter(feet));
+                if(world.isChunkLoaded(feet)&&world.getBlockState(feet.down()).isSolidBlock(world,feet.down())&&!world.getBlockState(feet.down()).isOf(net.minecraft.block.Blocks.MAGMA_BLOCK)&&!world.getBlockState(feet.down()).isOf(net.minecraft.block.Blocks.CACTUS)&&world.isAir(feet)&&world.isAir(feet.up())){
+                    var passenger=passengers.get(exits.size());var target=Vec3d.ofBottomCenter(feet);
+                    var box=passenger.getBoundingBox().offset(target.x-passenger.getX(),target.y-passenger.getY(),target.z-passenger.getZ());
+                    boolean distinct=exitBoxes.stream().noneMatch(b->b.intersects(box));
+                    int minX=MathHelper.floor(box.minX)>>4,maxX=MathHelper.floor(box.maxX)>>4,minZ=MathHelper.floor(box.minZ)>>4,maxZ=MathHelper.floor(box.maxZ)>>4;
+                    boolean loaded=maxX-minX<=4&&maxZ-minZ<=4;
+                    for(int cx=minX;loaded&&cx<=maxX;cx++)for(int cz=minZ;loaded&&cz<=maxZ;cz++)loaded=world.isChunkLoaded(cx,cz);
+                    if(distinct&&loaded&&world.getWorldBorder().contains(box)&&world.isSpaceEmpty(passenger,box)){exits.add(target);exitBoxes.add(box);}
+                }
             }
             if(exits.size()<passengers.size())return; // No verified safe exit: keep boat, retry; never dump passengers into void/water.
             { // Refresh the archive immediately before removal, including inventory changes after a restart.
                 var seizure=new TollStore.Seizure();seizure.boat=o.boat;seizure.dimension=world.getRegistryKey().getValue().toString();seizure.reason=o.reference;seizure.entityType=net.minecraft.registry.Registries.ENTITY_TYPE.getId(boat.getType()).toString();
                 seizure.nbt=boat.writeNbt(new NbtCompound()).asString();store.seizures.put(o.boat,seizure);if(!save())return;
             }
+            for(var passenger:passengers)if(passenger instanceof ServerPlayerEntity rider)rider.sendMessage(Text.literal("同船乘客通行费余额不足，本船将移除；全部乘客将安全下船。已付通行费不自动退还。"),false);
             for(int i=0;i<passengers.size();i++){var p=passengers.get(i);p.stopRiding();var v=exits.get(i);p.requestTeleport(v.x,v.y,v.z);}
-            boat.discard(); // no loot drops: chest inventory preserved in the durable confiscation record
+            boat.discard(); // Ordinary boats only; chest boats are never removed.
             store.seizures.get(o.boat).status="REMOVED";
             for(var order:store.orders.values())if(o.boat.equals(order.boat)&&order.status.equals("INSUFFICIENT"))order.status="CONFISCATED";
-            save();return;
+            seizureWindows.remove(o.reference);save();return;
         }
     }
 }
