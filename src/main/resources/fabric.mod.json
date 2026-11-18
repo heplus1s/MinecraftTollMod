@@ -15,7 +15,7 @@
     "minecraft": "1.20.1",
     "java": ">=17",
     "fabric-api": "*",
-    "bankmod": "*"
+    "bankmod": ">=1.0.17"
   },
   "mixins": [
     "tollmod.mixins.json"
