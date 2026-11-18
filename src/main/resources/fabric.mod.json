@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "tollmod",
   "version": "${version}",
-  "name": "\u901a\u884c\u6536\u8d39\u6a21\u7ec4",
+  "name": "通行收费模组",
   "description": "Server-authoritative per-player toll points with optional vanilla clients.",
-  "environment": "*",
+  "environment": "server",
   "entrypoints": {
     "main": [
       "dev.jdguo.toll.TollMod"

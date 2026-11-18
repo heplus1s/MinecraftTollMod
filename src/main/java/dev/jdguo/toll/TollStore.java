@@ -10,7 +10,7 @@ import java.util.*;
 public final class TollStore {
     public static final class Point {
         public String id=UUID.randomUUID().toString(), name,dimension,currency,currencyName,recipient,amount;
-        public String mode="legacy", owner;
+        public String mode="legacy", owner, creator;
         public double x,y,z,radius,height=4;
         public Double below,above;
         public double below(){return below==null?height:below;}
@@ -20,7 +20,7 @@ public final class TollStore {
     }
     public static final class Order {
         public String reference="toll:"+UUID.randomUUID(),player,recipient,currency,amount,point,boat,status="PENDING",lastCode="";
-        public String mode="legacy";
+        public String mode="legacy", creator;
         public String transport="legacy"; // missing field means original MarketSettlement protocol
     }
     public static final class Seizure {
@@ -49,6 +49,9 @@ public final class TollStore {
                 Point p=Objects.requireNonNull(entry.getValue());
                 UUID.fromString(p.id);if(!"system".equals(p.mode))UUID.fromString(p.recipient);
                 if(!Set.of("legacy","private","system").contains(p.mode))throw new IllegalStateException("mode");
+                // Earlier automatic private/system points stored the creating player as owner.
+                if(p.creator==null&&Set.of("private","system").contains(p.mode)&&p.owner!=null)p.creator=p.owner;
+                if(p.creator!=null)UUID.fromString(p.creator);
                 if("private".equals(p.mode)){UUID.fromString(p.owner);if(!p.owner.equals(p.recipient))throw new IllegalStateException("owner");}
                 if(!entry.getKey().equals(p.name)||p.name.isBlank()||p.dimension==null||p.currency==null||p.currencyName==null||new java.math.BigDecimal(p.amount).signum()<=0 || new java.math.BigDecimal(p.amount).scale()>4
                   ||!Double.isFinite(p.x)||!Double.isFinite(p.y)||!Double.isFinite(p.z)||!Double.isFinite(p.radius)||p.radius<1||p.radius>128||!Double.isFinite(p.height)||p.height<=0)throw new IllegalStateException("point");
@@ -58,6 +61,8 @@ public final class TollStore {
                 Order o=Objects.requireNonNull(entry.getValue());UUID.fromString(o.player);if(!"system".equals(o.mode))UUID.fromString(o.recipient);UUID.fromString(o.point);
                 if(!Set.of("legacy","private","system").contains(o.mode))throw new IllegalStateException("mode");
                 if(!Set.of("legacy","toll-v1").contains(o.transport))throw new IllegalStateException("transport");
+                if(o.creator==null)for(var point:s.points.values())if(point.id.equals(o.point)){o.creator=point.creator;break;}
+                if(o.creator!=null)UUID.fromString(o.creator);
                 if(o.boat!=null)UUID.fromString(o.boat);
                 if(!entry.getKey().equals(o.reference)||!o.reference.startsWith("toll:")||o.currency==null||new java.math.BigDecimal(o.amount).signum()<=0 || new java.math.BigDecimal(o.amount).scale()>4||!Set.of("PENDING","PAID","INSUFFICIENT","CONFISCATED","REVIEW").contains(o.status))throw new IllegalStateException("order");
             }

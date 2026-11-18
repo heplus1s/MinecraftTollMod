@@ -12,6 +12,12 @@ public final class TollPolicy {
     private TollPolicy() {}
 
     public record Chunk(int x, int z) {}
+    public static boolean isCreator(String creator,String player){return creator!=null&&creator.equals(player);}
+    /** Recipient self-transfers remain no-ops; operator status does not confer any exemption. */
+    public static boolean exemptFromNewOrder(TollStore.Point point,String player){
+        return isCreator(point.creator,player)||(point.recipient!=null&&point.recipient.equals(player));
+    }
+
 
     /** Every 16x16 chunk touched by the closed horizontal disk, including boundary touches. */
     public static Set<Chunk> coveredChunks(double x, double z, double radius) {
