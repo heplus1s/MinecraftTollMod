@@ -22,20 +22,35 @@ public final class TollPolicy {
     public static boolean isCreator(String creator,String player){return creator!=null&&creator.equals(player);}
     /** Recipient self-transfers remain no-ops; operator status does not confer any exemption. */
     public static boolean exemptFromNewOrder(TollStore.Point point,String player){
-        return isCreator(point.creator,player)||(point.recipient!=null&&point.recipient.equals(player));
+        return switch(point.mode) {
+            case "system" -> false;
+            case "private" -> isCreator(point.creator,player);
+            default -> isCreator(point.creator,player)||(point.recipient!=null&&point.recipient.equals(player));
+        };
     }
 
 
+    /** Keep historical self-orders in manual review rather than replaying an old exemption. */
+    public static boolean exemptOrder(TollStore.Order order) {
+        return !("system".equals(order.mode)&&order.systemCreatorChargeAllowed) && isCreator(order.creator,order.player);
+    }
+
     /** Every 16x16 chunk touched by the closed horizontal disk, including boundary touches. */
     public static Set<Chunk> coveredChunks(double x, double z, double radius) {
-        if (!Double.isFinite(x) || !Double.isFinite(z) || !Double.isFinite(radius)
+        return coveredChunks(x,z,radius,radius,false);
+    }
+    public static Set<Chunk> coveredChunks(TollStore.Point point) {
+        return coveredChunks(point.x,point.z,point.radius,point.isBox()?point.halfZ:point.radius,point.isBox());
+    }
+    private static Set<Chunk> coveredChunks(double x,double z,double radius,double halfZ,boolean box) {
+        if (!Double.isFinite(halfZ)||halfZ<1||halfZ>128||!Double.isFinite(x) || !Double.isFinite(z) || !Double.isFinite(radius)
                 || radius < 1 || radius > 128 || Math.abs(x) > 30_000_000 || Math.abs(z) > 30_000_000)
             throw new IllegalArgumentException("Invalid toll position/radius");
         // ceil(min/16)-1 deliberately includes the chunk immediately left of an exact boundary.
         int minX = (int) Math.ceil((x - radius) / 16.0) - 1;
         int maxX = (int) Math.floor((x + radius) / 16.0);
-        int minZ = (int) Math.ceil((z - radius) / 16.0) - 1;
-        int maxZ = (int) Math.floor((z + radius) / 16.0);
+        int minZ = (int) Math.ceil((z - halfZ) / 16.0) - 1;
+        int maxZ = (int) Math.floor((z + halfZ) / 16.0);
         Set<Chunk> result = new LinkedHashSet<>();
         double squared = radius * radius;
         for (int cx = minX; cx <= maxX; cx++) {
@@ -44,7 +59,7 @@ public final class TollPolicy {
             for (int cz = minZ; cz <= maxZ; cz++) {
                 double top = cz * 16.0, bottom = top + 16.0;
                 double dz = z < top ? top - z : z > bottom ? z - bottom : 0;
-                if (dx * dx + dz * dz <= squared) result.add(new Chunk(cx, cz));
+                if (box || dx * dx + dz * dz <= squared) result.add(new Chunk(cx, cz));
             }
         }
         return Collections.unmodifiableSet(result);

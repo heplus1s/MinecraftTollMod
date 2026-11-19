@@ -42,6 +42,31 @@ public final class BankBridge {
         for(Object d:defs)result.add(new Currency((String)d.getClass().getMethod("id").invoke(d),(String)d.getClass().getMethod("name").invoke(d)));
         return result;
     }
+    /** Exact current payer balance, never reconstructed from a receipt or rounded to whole units.
+     * Personal coins use a separate holdings book; the total can include listed units.
+     * Call on the server thread. An absent or unreadable row is not a zero balance.
+     */
+    public record AccountBalance(String name, BigDecimal amount) {}
+    public static Optional<AccountBalance> accountBalance(UUID player, String currency) {
+        try {
+            Class<?> runtime = Class.forName("dev.jdguo.bank.persistence.BankRuntime");
+            if (runtime.getField("state").get(null) == null || currency == null) return Optional.empty();
+            Object books = runtime.getMethod("books").invoke(null);
+            Class<?> type = books.getClass();
+            boolean personal = currency.startsWith("personal:");
+            UUID coin = personal ? UUID.fromString(currency.substring("personal:".length())) : null;
+            Object definition = personal ? type.getMethod("personalNoteById", UUID.class).invoke(books, coin)
+                    : type.getMethod("currency", String.class).invoke(books, currency);
+            if (definition == null) return Optional.empty();
+            String name = (String) definition.getClass().getMethod("name").invoke(definition);
+            BigDecimal amount = personal
+                    ? (BigDecimal) type.getMethod("personalHoldingExact", UUID.class, UUID.class).invoke(books, coin, player)
+                    : (BigDecimal) type.getMethod("balanceExact", UUID.class, String.class).invoke(books, player, currency);
+            return Optional.of(new AccountBalance(name == null || name.isBlank() ? currency : name, amount));
+        } catch (ReflectiveOperationException | RuntimeException unavailable) {
+            return Optional.empty();
+        }
+    }
     public static Currency resolve(String text,List<Currency> all) {
         if(text.startsWith("id:")) return all.stream().filter(c->c.id.equals(text.substring(3))).findFirst().orElseThrow(()->new IllegalArgumentException("未知货币 ID"));
         List<Currency> matches=all.stream().filter(c->c.id.equals(text)||c.name.equals(text)).toList();

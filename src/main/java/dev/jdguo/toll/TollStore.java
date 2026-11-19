@@ -12,7 +12,20 @@ public final class TollStore {
         public String id=UUID.randomUUID().toString(), name,dimension,currency,currencyName,recipient,amount;
         public String mode="legacy", owner, creator;
         public double x,y,z,radius,height=4;
-        public Double below,above;
+        // No halfZ in older saves: radius retains its original circular meaning.
+        public Double below,above,halfZ;
+        public boolean isBox(){return halfZ!=null;}
+        public boolean inside(Geometry.Position pos,double pad){
+            return isBox()?Geometry.insideBox(pos,center(),radius+pad,halfHeight()+pad,halfZ+pad)
+                    :Geometry.inside(pos,center(),radius+pad,halfHeight()+pad);
+        }
+        public boolean crosses(Geometry.Position a,Geometry.Position b){
+            return isBox()?Geometry.crossesBox(a,b,center(),radius,halfHeight(),halfZ)
+                    :Geometry.crosses(a,b,center(),radius,halfHeight());
+        }
+        public String footprint(){
+            return isBox()?"方形（X半宽 "+radius+"、Z半宽 "+halfZ+" 格）":"圆柱（半径 "+radius+" 格）";
+        }
         public double below(){return below==null?height:below;}
         public double above(){return above==null?height:above;}
         public double halfHeight(){return (below()+above())/2;}
@@ -21,6 +34,7 @@ public final class TollStore {
     public static final class Order {
         public String reference="toll:"+UUID.randomUUID(),player,recipient,currency,amount,point,boat,status="PENDING",lastCode="";
         public String mode="legacy", creator;
+        public boolean systemCreatorChargeAllowed; // historical orders default false
         public String transport="legacy"; // missing field means original MarketSettlement protocol
     }
     public static final class Seizure {
@@ -55,6 +69,7 @@ public final class TollStore {
                 if("private".equals(p.mode)){UUID.fromString(p.owner);if(!p.owner.equals(p.recipient))throw new IllegalStateException("owner");}
                 if(!entry.getKey().equals(p.name)||p.name.isBlank()||p.dimension==null||p.currency==null||p.currencyName==null||new java.math.BigDecimal(p.amount).signum()<=0 || new java.math.BigDecimal(p.amount).scale()>4
                   ||!Double.isFinite(p.x)||!Double.isFinite(p.y)||!Double.isFinite(p.z)||!Double.isFinite(p.radius)||p.radius<1||p.radius>128||!Double.isFinite(p.height)||p.height<=0)throw new IllegalStateException("point");
+                if(p.isBox()&&(!Double.isFinite(p.halfZ)||p.halfZ<1||p.halfZ>128))throw new IllegalStateException("box extent");
                 if(!Double.isFinite(p.below())||!Double.isFinite(p.above())||p.below()<0||p.above()<0||p.below()>128||p.above()>128||p.halfHeight()<=0)throw new IllegalStateException("height");
             }
             for(var entry:s.orders.entrySet()) {

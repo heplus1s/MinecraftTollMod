@@ -18,4 +18,30 @@ public final class Geometry {
         double root=Math.sqrt(d);lo=Math.max(lo,(-B-root)/(2*A));hi=Math.min(hi,(-B+root)/(2*A));
         return lo<=hi;
     }
+    public static boolean insideBox(Position p, Position c, double hx, double h, double hz) {
+        return Math.abs(p.x-c.x)<=hx && Math.abs(p.y-c.y)<=h && Math.abs(p.z-c.z)<=hz;
+    }
+
+    /** Clip the same movement interval against each axis; both endpoints may be outside. */
+    public static boolean crossesBox(Position a, Position b, Position c, double hx, double h, double hz) {
+        double[] range={0,1};
+        return clip(a.x-c.x,b.x-a.x,hx,range) && clip(a.y-c.y,b.y-a.y,h,range)
+                && clip(a.z-c.z,b.z-a.z,hz,range);
+    }
+    private static boolean clip(double a,double delta,double extent,double[] range) {
+        if(delta==0)return Math.abs(a)<=extent;
+        double t1=(-extent-a)/delta,t2=(extent-a)/delta;
+        range[0]=Math.max(range[0],Math.min(t1,t2));
+        range[1]=Math.min(range[1],Math.max(t1,t2));
+        return range[0]<=range[1];
+    }
+
+    public static boolean overlaps(TollStore.Point a,TollStore.Point b,double pad) {
+        if(!a.dimension.equals(b.dimension) || Math.abs(a.center().y-b.center().y)>a.halfHeight()+b.halfHeight()+2*pad)return false;
+        double dx=Math.abs(a.x-b.x),dz=Math.abs(a.z-b.z);
+        if(!a.isBox()&&!b.isBox())return Math.hypot(dx,dz)<=a.radius+b.radius+2*pad;
+        if(a.isBox()&&b.isBox())return dx<=a.radius+b.radius+2*pad && dz<=a.halfZ+b.halfZ+2*pad;
+        var box=a.isBox()?a:b;var circle=a.isBox()?b:a;
+        return Math.hypot(Math.max(0,dx-box.radius-pad),Math.max(0,dz-box.halfZ-pad))<=circle.radius+pad;
+    }
 }

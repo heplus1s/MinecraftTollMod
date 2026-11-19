@@ -53,8 +53,8 @@ public final class TollMod implements ModInitializer {
             .then(literal("create").requires(s->s.hasPermissionLevel(2)).then(argument("name",StringArgumentType.string()).then(argument("radius",DoubleArgumentType.doubleArg(1,128))
                 .then(argument("currency",StringArgumentType.string()).suggests((c,b)->{try {for(var v:BankBridge.currencies()){b.suggest("\""+v.name()+"\"");b.suggest("\"id:"+v.id()+"\"");}}catch(Exception ignored){}return b.buildFuture();})
                 .then(argument("amount",IntegerArgumentType.integer(1,1000000000)).then(argument("recipient",StringArgumentType.word()).executes(c->create(c.getSource(),StringArgumentType.getString(c,"name"),DoubleArgumentType.getDouble(c,"radius"),StringArgumentType.getString(c,"currency"),IntegerArgumentType.getInteger(c,"amount"),StringArgumentType.getString(c,"recipient")))))))))
-            .then(literal("list").executes(c->{if(!ready(c.getSource()))return 0;for(var p:store.points.values())if(canManage(c.getSource(),p))c.getSource().sendFeedback(()->Text.literal(p.name+" | "+p.radius+"格 | "+p.amount+" "+p.currencyName),false);return store.points.size();}))
-            .then(literal("info").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");c.getSource().sendFeedback(()->Text.literal(p.name+" "+p.dimension+" "+p.x+","+p.y+","+p.z+" 半径="+p.radius+" 向下="+p.below()+" 向上="+p.above()+" 费用="+p.amount+" "+p.currencyName+" ["+p.currency+"] 收款="+p.recipient+" 创建者="+(p.creator==null?"历史数据未记录":p.creator)),false);return 1;})))
+            .then(literal("list").executes(c->{if(!ready(c.getSource()))return 0;for(var p:store.points.values())if(canManage(c.getSource(),p))c.getSource().sendFeedback(()->Text.literal(p.name+" | "+p.footprint()+" | "+p.amount+" "+p.currencyName),false);return store.points.size();}))
+            .then(literal("info").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");c.getSource().sendFeedback(()->Text.literal(p.name+" "+p.dimension+" "+p.x+","+p.y+","+p.z+" "+p.footprint()+" 向下="+p.below()+" 向上="+p.above()+" 费用="+p.amount+" "+p.currencyName+" ["+p.currency+"] 收款="+p.recipient+" 创建者="+(p.creator==null?"历史数据未记录":p.creator)),false);return 1;})))
             .then(literal("remove").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");store.points.remove(p.name);store.blocked.removeIf(k->k.endsWith(":"+p.id));if(!save())return error(c.getSource(),"保存失败，收费已暂停");c.getSource().sendFeedback(()->Text.literal("已删除收费点；历史订单保留"),true);return 1;})))
         ));
     }
@@ -62,20 +62,33 @@ public final class TollMod implements ModInitializer {
         return literal(mode).then(argument("currency",StringArgumentType.string())
             .suggests((c,b)->{try {for(var v:BankBridge.currencies())b.suggest("\"id:"+v.id()+"\"");}catch(Exception ignored){}return b.buildFuture();})
             .then(argument("amount",StringArgumentType.word())
-                .executes(c->createAutomatic(c.getSource(),mode,3,2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
+                .executes(c->createAutomatic(c.getSource(),mode,3,null,2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
                 .then(argument("radius",DoubleArgumentType.doubleArg(1,128))
-                    .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
+                    .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),null,2,2,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount")))
                     .then(argument("below",DoubleArgumentType.doubleArg(0,128)).then(argument("above",DoubleArgumentType.doubleArg(0,128))
-                        .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),DoubleArgumentType.getDouble(c,"below"),DoubleArgumentType.getDouble(c,"above"),StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount"))))))));
+                        .executes(c->createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"radius"),null,DoubleArgumentType.getDouble(c,"below"),DoubleArgumentType.getDouble(c,"above"),StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount"))))))
+                .then(boxCommand(mode))));
+    }
+    private com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> boxCommand(String mode) {
+        return literal("box").then(argument("halfX",DoubleArgumentType.doubleArg(1,128))
+            .then(argument("halfZ",DoubleArgumentType.doubleArg(1,128))
+                .executes(c->createBox(c,mode,2,2))
+                .then(argument("below",DoubleArgumentType.doubleArg(0,128))
+                    .then(argument("above",DoubleArgumentType.doubleArg(0,128))
+                        .executes(c->createBox(c,mode,DoubleArgumentType.getDouble(c,"below"),DoubleArgumentType.getDouble(c,"above")))))));
+    }
+    private int createBox(com.mojang.brigadier.context.CommandContext<ServerCommandSource> c,String mode,double below,double above){
+        return createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"halfX"),DoubleArgumentType.getDouble(c,"halfZ"),
+                below,above,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount"));
     }
     private boolean canManage(ServerCommandSource s,TollStore.Point p){
         return s.hasPermissionLevel(2) || ("private".equals(p.mode) && s.getEntity() instanceof ServerPlayerEntity player && player.getUuidAsString().equals(p.owner));
     }
-    private int createAutomatic(ServerCommandSource s,String mode,double radius,double below,double above,String currency,String input) {
+    private int createAutomatic(ServerCommandSource s,String mode,double radius,Double halfZ,double below,double above,String currency,String input) {
         if(!ready(s))return 0;
         if("system".equals(mode)&&!BankBridge.modernApi())return error(s,"银行尚未提供收费系统账户接口，不能创建系统收费点，请升级配套银行模组");
         try {
-            if(!(s.getEntity() instanceof ServerPlayerEntity))return error(s,"创建收费点须由玩家执行；控制台没有玩家创建者，不会自动给管理员免收");
+            if(!(s.getEntity() instanceof ServerPlayerEntity))return error(s,"创建收费点须由玩家执行；位置取玩家当前位置");
             var player=s.getPlayerOrThrow();var cur=BankBridge.resolve(currency,BankBridge.currencies());
             BigDecimal amount=TollPolicy.parseAmount(input,!cur.id().equals("note")&&!cur.id().startsWith("personal:"));
             if(amount.compareTo(new BigDecimal("1000000000"))>0)return error(s,"金额不能超过1000000000");
@@ -83,15 +96,15 @@ public final class TollMod implements ModInitializer {
             if(below+above<=0)return error(s,"上下范围不能同时为0");
             if("system".equals(mode)){var preview=BankBridge.previewSystem(cur.id(),amount);if(!preview.success())return error(s,"当前无法以该金额结算系统收费："+preview.code()+"。未创建收费点，未扣款。");}
             var p=new TollStore.Point();p.below=below;p.above=above;p.name=p.id;p.mode=mode;p.owner=player.getUuidAsString();p.creator=player.getUuidAsString();p.recipient="private".equals(mode)?p.owner:null;
-            p.radius=radius;p.x=player.getX();p.y=player.getY();p.z=player.getZ();p.dimension=player.getWorld().getRegistryKey().getValue().toString();
+            p.radius=radius;p.halfZ=halfZ;p.x=player.getX();p.y=player.getY();p.z=player.getZ();p.dimension=player.getWorld().getRegistryKey().getValue().toString();
             p.currency=cur.id();p.currencyName=cur.name();p.amount=amount.toPlainString();
             if("private".equals(mode)&&!LandBridge.ownsArea(s.getServer(),player.getUuid(),p))return error(s,"收费范围必须完全位于你自己的领地内；领地接口不可用时禁止创建");
             if(store.points.size()>=128)return error(s,"最多支持128个收费点");
-            for(var other:store.points.values())if(p.dimension.equals(other.dimension)&&Math.abs(p.center().y()-other.center().y())<=p.halfHeight()+other.halfHeight()+4&&Math.hypot(p.x-other.x,p.z-other.z)<=p.radius+other.radius+4)return error(s,"与其他收费点或缓冲区重叠");
+            for(var other:store.points.values())if(Geometry.overlaps(p,other,2))return error(s,"与其他收费点或缓冲区重叠");
             store.points.put(p.name,p);
-            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
+            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&p.inside(pos(q),2))store.blocked.add(key(q,p));
             if(!save())return error(s,"保存失败，收费暂停");
-            s.sendFeedback(()->Text.literal("已创建"+("private".equals(mode)?"私人":"系统")+"收费点 "+p.name+"；每人 "+p.amount+" "+p.currencyName+"，半径"+p.radius+"，向下"+p.below()+"、向上"+p.above()+"格"),true);return 1;
+            s.sendFeedback(()->Text.literal("已创建"+("private".equals(mode)?"私人":"系统")+"收费点 "+p.name+"；每人 "+p.amount+" "+p.currencyName+"，"+p.footprint()+"，向下"+p.below()+"、向上"+p.above()+"格"),true);return 1;
         }catch(Exception invalid){return error(s,"创建失败："+invalid.getMessage());}
     }
     private boolean ready(ServerCommandSource s){if(!healthy){error(s,"收费服务不可用，请检查日志/保存文件");return false;}return true;}
@@ -110,10 +123,10 @@ public final class TollMod implements ModInitializer {
             try{payee=UUID.fromString(recipient);}catch(IllegalArgumentException e){var target=s.getServer().getPlayerManager().getPlayer(recipient);if(target==null)return error(s,"名称须为在线玩家，离线收款人请用 UUID");payee=target.getUuid();}
             var cur=BankBridge.resolve(currency,BankBridge.currencies());
             var p=new TollStore.Point();p.creator=player.getUuidAsString();p.name=name;p.radius=radius;p.x=player.getX();p.y=player.getY();p.z=player.getZ();p.dimension=player.getWorld().getRegistryKey().getValue().toString();p.currency=cur.id();p.currencyName=cur.name();p.amount=Integer.toString(amount);p.recipient=payee.toString();
-            for(var other:store.points.values()) if(p.dimension.equals(other.dimension)&&Math.abs(p.center().y()-other.center().y())<=p.halfHeight()+other.halfHeight()+4&&Math.hypot(p.x-other.x,p.z-other.z)<=p.radius+other.radius+4)return error(s,"与已有收费点/缓冲区重叠，请移动中心");
+            for(var other:store.points.values()) if(Geometry.overlaps(p,other,2))return error(s,"与已有收费点/缓冲区重叠，请移动中心");
             store.points.put(name,p);if(!save())return error(s,"保存失败，收费暂停");
             // Creation must not immediately bill people already standing in the zone.
-            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&Geometry.inside(pos(q),p.center(),p.radius+2,p.halfHeight()+2))store.blocked.add(key(q,p));
+            for(var q:s.getServer().getPlayerManager().getPlayerList())if(q.getWorld().getRegistryKey().getValue().toString().equals(p.dimension)&&p.inside(pos(q),2))store.blocked.add(key(q,p));
             if(!save())return 0;
             s.sendFeedback(()->Text.literal("已启用 "+name+"，半径 "+radius+"，上下各4格；每人一次 "+amount+" "+cur.name()+"。普通船全员明确欠费才没收，否则仅欠费者下船；箱船仅让欠费乘客直接下船，不移除船或物品。"),true);return 1;
         }catch(Exception e){return error(s,"创建失败："+e.getMessage());}
@@ -138,7 +151,7 @@ public final class TollMod implements ModInitializer {
             for(var point:store.points.values()){
                 if(!point.dimension.equals(current.dimension))continue;
                 if(TollPolicy.exemptFromNewOrder(point,p.getUuidAsString()))continue; // before orders, balance checks, or vehicle enforcement
-                String k=key(p,point);boolean insideBuffer=Geometry.inside(current.pos,point.center(),point.radius+2,point.halfHeight()+2);
+                String k=key(p,point);boolean insideBuffer=point.inside(current.pos,2);
                 if(prev==null||!prev.dimension.equals(current.dimension)||distance(prev.pos,current.pos)>64){
                     if(insideBuffer&&store.blocked.add(k)&&!save())return;
                     continue; // login/respawn/dimension or large teleport: no fabricated travel segment
@@ -146,14 +159,14 @@ public final class TollMod implements ModInitializer {
                 if(store.blocked.contains(k)){
                     if(!insideBuffer&&ticks%20==0){store.blocked.remove(k);if(!save())return;}continue;
                 }
-                if(Geometry.crosses(prev.pos,current.pos,point.center(),point.radius,point.halfHeight())){
+                if(point.crosses(prev.pos,current.pos)){
                     if("private".equals(point.mode)&&!LandBridge.ownsArea(server,UUID.fromString(point.owner),point)){
                         store.blocked.add(k);if(!save())return;continue; // do not charge a stationary player if ownership later returns
                     }
                     if(store.orders.values().stream().anyMatch(o->o.player.equals(p.getUuidAsString())&&o.point.equals(point.id)&&o.status.equals("PENDING")))continue;
                     if(store.orders.size()>=10000){healthy=false;System.err.println("[tollmod] 10000 order safety limit reached; paused, archive with administrator review.");return;}
                     store.blocked.add(k);
-                    var o=new TollStore.Order();o.transport=BankBridge.modernApi()?"toll-v1":"legacy";o.mode=point.mode;o.creator=point.creator;o.player=p.getUuidAsString();o.recipient=point.recipient;o.currency=point.currency;o.amount=point.amount;o.point=point.id;o.boat=current.vehicle instanceof BoatEntity?current.vehicle.getUuidAsString():null;
+                    var o=new TollStore.Order();o.transport=BankBridge.modernApi()?"toll-v1":"legacy";o.mode=point.mode;o.creator=point.creator;o.systemCreatorChargeAllowed="system".equals(point.mode);o.player=p.getUuidAsString();o.recipient=point.recipient;o.currency=point.currency;o.amount=point.amount;o.point=point.id;o.boat=current.vehicle instanceof BoatEntity?current.vehicle.getUuidAsString():null;
                     if(o.boat!=null){
                         Passage passage=newPassages.computeIfAbsent(o.boat+":"+point.id,unused->{
                             Set<String> passengers=new HashSet<>(),exempt=new HashSet<>();
@@ -167,7 +180,6 @@ public final class TollMod implements ModInitializer {
                     }
                     store.orders.put(o.reference,o);if(!save())return;
                     if(o.boat!=null)seizureWindows.put(o.reference,ticks+100);
-                    p.sendMessage(Text.literal("收费点「"+point.name+"」："+point.amount+" "+point.currencyName),false);
                     pay(o,server);if(!healthy)return;
                 }
             }
@@ -187,18 +199,19 @@ public final class TollMod implements ModInitializer {
             var order=entry.getValue();var rider=server.getPlayerManager().getPlayer(UUID.fromString(order.player));
             var point=store.points.values().stream().filter(v->v.id.equals(order.point)).findFirst().orElse(null);
             if(rider==null||point==null||!rider.getWorld().getRegistryKey().getValue().toString().equals(point.dimension)
-                    ||!Geometry.inside(pos(rider),point.center(),point.radius+2,point.halfHeight()+2))return true;
+                    ||!point.inside(pos(rider),2))return true;
             if(rider.getVehicle()!=null&&rider.getVehicle().getUuidAsString().equals(order.boat))rider.stopRiding();
             return false;
         });
     }
     private static double distance(Geometry.Position a,Geometry.Position b){return Math.sqrt(Math.pow(a.x()-b.x(),2)+Math.pow(a.y()-b.y(),2)+Math.pow(a.z()-b.z(),2));}
     private void pay(TollStore.Order o,MinecraftServer server){
-        if(TollPolicy.isCreator(o.creator,o.player)){
+        if(TollPolicy.exemptOrder(o)){
             // Older pending orders may already have a bank receipt. Never retry a new charge,
             // invent a refund, or seize a boat; retain the reference for manual receipt review.
-            o.status="REVIEW";o.lastCode="creator_exempt_receipt_review";seizureWindows.remove(o.reference);save();return;
+            o.status="REVIEW";o.lastCode="payer_exempt_receipt_review";seizureWindows.remove(o.reference);save();return;
         }
+        boolean firstAttempt=o.lastCode==null||o.lastCode.isEmpty();
         var r=BankBridge.charge(o);
         o.lastCode=r.code();
         if(r.success())o.status="PAID";
@@ -208,13 +221,14 @@ public final class TollMod implements ModInitializer {
         // Never promote an in-memory marketReceipt to a durable success.
         if(!save())return;
         var p=server.getPlayerManager().getPlayer(UUID.fromString(o.player));
-        if(p!=null&&!o.status.equals("PENDING")){
-            p.sendMessage(Text.literal("通行收费："+o.status+" ("+r.code()+")"),false);
+        if(p!=null&&(!o.status.equals("PENDING")||firstAttempt)){
+            var point=store.points.values().stream().filter(v->v.id.equals(o.point)).findFirst().orElse(null);
+            TollChat.send(p,server,o,point);
             if(o.status.equals("INSUFFICIENT")&&p.getVehicle() instanceof ChestBoatEntity)p.sendMessage(Text.literal("箱船通行费不足：仅欠费乘客直接下船；船、箱内物品及已付款乘客保留。"),false);
         }
     }
     private void ejectUnpaidPassenger(TollStore.Order order,ServerPlayerEntity debtor,BoatEntity boat){
-        if(!TollPolicy.shouldEjectChestPassenger(order.status,TollPolicy.isCreator(order.creator,order.player),
+        if(!TollPolicy.shouldEjectChestPassenger(order.status,TollPolicy.exemptOrder(order),
                 debtor.getVehicle()==boat && boat.getPassengerList().contains(debtor)))return;
         // Requested policy: immediate dismount, with no safe-ground search or teleport.
         // Do not modify the boat, its inventory, or other passengers.
@@ -226,7 +240,7 @@ public final class TollMod implements ModInitializer {
     }
     private void confiscate(TollStore.Order o,MinecraftServer server){
         if(!healthy)return;
-        if(TollPolicy.isCreator(o.creator,o.player)){o.status="REVIEW";o.lastCode="creator_exempt";seizureWindows.remove(o.reference);save();return;}
+        if(TollPolicy.exemptOrder(o)){o.status="REVIEW";o.lastCode="payer_exempt";seizureWindows.remove(o.reference);save();return;}
         var debtor=server.getPlayerManager().getPlayer(UUID.fromString(o.player));
         Long expires=seizureWindows.get(o.reference);
         if(expires==null||ticks>expires||debtor==null||debtor.getVehicle()==null||!debtor.getVehicle().getUuidAsString().equals(o.boat)){

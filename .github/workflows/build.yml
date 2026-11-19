@@ -37,13 +37,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view v1.0.1 >/dev/null 2>&1; then
-            echo "Release v1.0.1 already exists; refusing to replace it."
+          if gh release view v1.0.2 >/dev/null 2>&1; then
+            echo "Release v1.0.2 already exists; refusing to replace it."
             exit 1
           fi
-          if gh api repos/heplus1s/MinecraftTollMod/git/ref/tags/v1.0.1 >/dev/null 2>&1; then
-            echo "Tag v1.0.1 already exists; refusing to move it."
+          if gh api repos/heplus1s/MinecraftTollMod/git/ref/tags/v1.0.2 >/dev/null 2>&1; then
+            echo "Tag v1.0.2 already exists; refusing to move it."
             exit 1
           fi
-          gh release view v1.0.17 --repo heplus1s/MinecraftBankMod >/dev/null
-          gh release create v1.0.1 release-jars/tollmod-1.0.1.jar --target "$GITHUB_SHA" --title "v1.0.1 显示收费主体" --notes-file RELEASE_NOTES_1.0.1.md
+          gh release view v1.0.27 --repo heplus1s/MinecraftBankMod >/dev/null
+          gh release create v1.0.2 release-jars/tollmod-1.0.2.jar --target "$GITHUB_SHA" --title "v1.0.2 方形收费点与彩色扣费提示" --notes-file RELEASE_NOTES_1.0.2.md

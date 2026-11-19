@@ -10,7 +10,7 @@ public final class LandBridge {
         try {
             var api=Class.forName("dev.jdguo.land.api.LandApi");
             var lookup=api.getMethod("parcelAt", MinecraftServer.class,String.class,int.class,int.class);
-            for (var chunk:TollPolicy.coveredChunks(point.x,point.z,point.radius)) {
+            for (var chunk:TollPolicy.coveredChunks(point)) {
                 Object parcel=lookup.invoke(null,server,point.dimension,chunk.x(),chunk.z());
                 if(parcel==null || !owner.equals(parcel.getClass().getMethod("owner").invoke(parcel)))return false;
             }
