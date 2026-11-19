@@ -11,6 +11,7 @@ import net.minecraft.entity.EntityType;
 import net.minecraft.entity.decoration.DisplayEntity;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.MathHelper;
@@ -67,9 +68,9 @@ public final class TollHolograms {
                     display.addCommandTag(TAG);
                     display.addCommandTag(POINT_TAG + point.id);
                     display.refreshPositionAndAngles(point.x, point.y + LIFT, point.z, 0, 0);
-                    style(display, point);
+                    style(display, point, server);
                     world.spawnEntity(display); // false is safe; the next reconcile retries without creating duplicates.
-                } else style(display, point);
+                } else style(display, point, server);
             }
         }
     }
@@ -95,9 +96,26 @@ public final class TollHolograms {
         return result == null ? "" : result;
     }
 
-    private static void style(DisplayEntity.TextDisplayEntity display, TollStore.Point point) {
+    private static String chargingEntity(MinecraftServer server, TollStore.Point point) {
+        if ("system".equals(point.mode)) return "中央银行";
+        if (point.recipient == null) return "收款人名称未记录";
+        UUID recipient;
+        try {
+            recipient = UUID.fromString(point.recipient);
+        } catch (IllegalArgumentException invalid) {
+            return "收款人名称未记录";
+        }
+        ServerPlayerEntity online = server.getPlayerManager().getPlayer(recipient);
+        if (online != null) return online.getGameProfile().getName();
+        var cache = server.getUserCache();
+        return cache == null ? "收款人名称未记录"
+                : cache.getByUuid(recipient).map(profile -> profile.getName())
+                        .filter(name -> !name.isBlank()).orElse("收款人名称未记录");
+    }
+
+    private static void style(DisplayEntity.TextDisplayEntity display, TollStore.Point point, MinecraftServer server) {
         String currency = point.currencyName == null ? point.currency : point.currencyName;
-        String label = "通行收费\n每人 " + point.amount + " " + currency + "\n半径 " + point.radius + " 格 · 向下 " + point.below() + " / 向上 " + point.above() + " 格";
+        String label = "通行收费\n每人 " + point.amount + " " + currency + "\n收费主体：" + chargingEntity(server, point);
         NbtCompound nbt = new NbtCompound();
         display.writeNbt(nbt);
         nbt.putString("text", Text.Serializer.toJson(Text.literal(label)));
