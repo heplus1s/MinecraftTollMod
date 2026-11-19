@@ -45,5 +45,5 @@ jobs:
             echo "Tag v1.0.2 already exists; refusing to move it."
             exit 1
           fi
-          gh release view v1.0.27 --repo heplus1s/MinecraftBankMod >/dev/null
+          gh release view v1.0.17 --repo heplus1s/MinecraftBankMod >/dev/null
           gh release create v1.0.2 release-jars/tollmod-1.0.2.jar --target "$GITHUB_SHA" --title "v1.0.2 方形收费点与彩色扣费提示" --notes-file RELEASE_NOTES_1.0.2.md
