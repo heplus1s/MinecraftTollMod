@@ -55,7 +55,9 @@ public final class TollMod implements ModInitializer {
                 .then(argument("amount",IntegerArgumentType.integer(1,1000000000)).then(argument("recipient",StringArgumentType.word()).executes(c->create(c.getSource(),StringArgumentType.getString(c,"name"),DoubleArgumentType.getDouble(c,"radius"),StringArgumentType.getString(c,"currency"),IntegerArgumentType.getInteger(c,"amount"),StringArgumentType.getString(c,"recipient")))))))))
             .then(literal("list").executes(c->{if(!ready(c.getSource()))return 0;for(var p:store.points.values())if(canManage(c.getSource(),p))c.getSource().sendFeedback(()->Text.literal(p.name+" | "+p.footprint()+" | "+p.amount+" "+p.currencyName),false);return store.points.size();}))
             .then(literal("info").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");c.getSource().sendFeedback(()->Text.literal(p.name+" "+p.dimension+" "+p.x+","+p.y+","+p.z+" "+p.footprint()+" 向下="+p.below()+" 向上="+p.above()+" 费用="+p.amount+" "+p.currencyName+" ["+p.currency+"] 收款="+p.recipient+" 创建者="+(p.creator==null?"历史数据未记录":p.creator)),false);return 1;})))
-            .then(literal("remove").then(argument("name",StringArgumentType.string()).executes(c->{if(!ready(c.getSource()))return 0;var p=store.points.get(StringArgumentType.getString(c,"name"));if(p==null||!canManage(c.getSource(),p))return error(c.getSource(),"收费点不存在或无权管理");store.points.remove(p.name);store.blocked.removeIf(k->k.endsWith(":"+p.id));if(!save())return error(c.getSource(),"保存失败，收费已暂停");c.getSource().sendFeedback(()->Text.literal("已删除收费点；历史订单保留"),true);return 1;})))
+            .then(literal("remove")
+                .then(literal("nearby").executes(c->removeNearby(c.getSource())))
+                .then(argument("name",StringArgumentType.string()).executes(c->removeNamed(c.getSource(),StringArgumentType.getString(c,"name")))))
         ));
     }
     private com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> automaticCommand(String mode) {
@@ -81,6 +83,33 @@ public final class TollMod implements ModInitializer {
         return createAutomatic(c.getSource(),mode,DoubleArgumentType.getDouble(c,"halfX"),DoubleArgumentType.getDouble(c,"halfZ"),
                 below,above,StringArgumentType.getString(c,"currency"),StringArgumentType.getString(c,"amount"));
     }
+    private int removeNearby(ServerCommandSource source) {
+        if (!ready(source)) return 0;
+        if (!(source.getEntity() instanceof ServerPlayerEntity player))
+            return error(source, "就近删除须由玩家在游戏内执行");
+        var dimension = player.getWorld().getRegistryKey().getValue().toString();
+        var selection = TollNearby.select(store.points.values(), dimension, pos(player));
+        if (selection.ambiguous()) return error(source, "有多个收费点同样近，请按收费点编号删除");
+        if (selection.point() == null) return error(source, "脚下没有收费区，10 格内也没有收费点中心");
+        return removePoint(source, selection.point());
+    }
+
+    private int removeNamed(ServerCommandSource source, String name) {
+        if (!ready(source)) return 0;
+        return removePoint(source, store.points.get(name));
+    }
+
+    private int removePoint(ServerCommandSource source, TollStore.Point point) {
+        // Authorize the selected target rather than falling through to a different one.
+        if (point == null || !canManage(source, point))
+            return error(source, "收费点不存在或无权管理");
+        store.points.remove(point.name);
+        store.blocked.removeIf(key -> key.endsWith(":" + point.id));
+        if (!save()) return error(source, "保存失败，收费已暂停");
+        source.sendFeedback(() -> Text.literal("已删除收费点：" + point.name + "；历史订单保留"), true);
+        return 1;
+    }
+
     private boolean canManage(ServerCommandSource s,TollStore.Point p){
         return s.hasPermissionLevel(2) || ("private".equals(p.mode) && s.getEntity() instanceof ServerPlayerEntity player && player.getUuidAsString().equals(p.owner));
     }
